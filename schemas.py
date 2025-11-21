@@ -12,9 +12,9 @@ Model name is converted to lowercase for the collection name:
 """
 
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import Optional, List
 
-# Example schemas (replace with your own):
+# Example schemas (retain for reference)
 
 class User(BaseModel):
     """
@@ -38,11 +38,23 @@ class Product(BaseModel):
     category: str = Field(..., description="Product category")
     in_stock: bool = Field(True, description="Whether product is in stock")
 
-# Add your own schemas here:
-# --------------------------------------------------
+# App-specific schemas
 
-# Note: The Flames database viewer will automatically:
-# 1. Read these schemas from GET /schema endpoint
-# 2. Use them for document validation when creating/editing
-# 3. Handle all database operations (CRUD) directly
-# 4. You don't need to create any database endpoints!
+class Song(BaseModel):
+    """
+    Songs collection schema
+    Collection name: "song"
+    Stores trending songs and fetched lyrics
+    """
+    title: str = Field(..., description="Song title")
+    artist: str = Field(..., description="Primary artist name")
+    album: Optional[str] = Field(None, description="Album name if available")
+    cover: Optional[str] = Field(None, description="Artwork URL")
+    apple_url: Optional[str] = Field(None, description="Apple Music URL")
+    preview_url: Optional[str] = Field(None, description="30s preview URL if available")
+    lyrics: Optional[str] = Field(None, description="Fetched lyrics text")
+    lyrics_source: Optional[str] = Field(None, description="Provider used to fetch lyrics")
+    country: Optional[str] = Field("id", description="Market/country code for charts")
+    lang: Optional[str] = Field("id", description="Language context for UI/lyrics")
+    rank: Optional[int] = Field(None, description="Chart position when stored")
+    tags: Optional[List[str]] = Field(default=None, description="Optional tags like 'trending', 'viral'")
