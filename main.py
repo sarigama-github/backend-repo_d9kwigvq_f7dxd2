@@ -2,9 +2,10 @@ import os
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 import requests
 from urllib.parse import quote
+import re
 
 from database import db, create_document, get_documents
 
@@ -63,9 +64,64 @@ def _get_song_from_db(title: str, artist: str) -> Optional[Dict[str, Any]]:
     return db["song"].find_one(_normalize_song_key(title, artist))
 
 
+# Text normalization helpers to improve lyrics hit-rate
+_feat_pattern = re.compile(r"\s*(feat\.|ft\.|featuring)\s+.*$", re.IGNORECASE)
+_paren_pattern = re.compile(r"\s*[\[(].*?[\])]", re.IGNORECASE)
+_extra_spaces = re.compile(r"\s{2,}")
+
+
+def clean_title(title: str) -> str:
+    t = title or ""
+    t = _paren_pattern.sub("", t)
+    t = _feat_pattern.sub("", t)
+    t = _extra_spaces.sub(" ", t).strip(" -\t\n")
+    return t
+
+
+def clean_artist(artist: str) -> str:
+    a = artist or ""
+    a = _feat_pattern.sub("", a)
+    a = _paren_pattern.sub("", a)
+    a = _extra_spaces.sub(" ", a).strip(" -\t\n")
+    return a
+
+
+def artist_variants(artist: str) -> List[str]:
+    a = clean_artist(artist)
+    parts = re.split(r"\s*[,&/]\s+", a)
+    variants = [a]
+    if parts:
+        variants.append(parts[0])  # primary artist only
+    # de-duplicate while preserving order
+    seen = set()
+    uniq = []
+    for v in variants:
+        if v and v.lower() not in seen:
+            uniq.append(v)
+            seen.add(v.lower())
+    return uniq
+
+
+def title_variants(title: str) -> List[str]:
+    t = clean_title(title)
+    variants = [t]
+    # Sometimes titles have dashes or colons; try left segment
+    for sep in [" - ", " – ", ": "]:
+        if sep in t:
+            variants.append(t.split(sep)[0].strip())
+    # de-duplicate
+    seen = set()
+    uniq = []
+    for v in variants:
+        if v and v.lower() not in seen:
+            uniq.append(v)
+            seen.add(v.lower())
+    return uniq
+
+
 # Lyrics provider chain
 
-def fetch_lyrics_from_providers(artist: str, title: str) -> (Optional[str], Optional[str]):
+def fetch_lyrics_from_providers(artist: str, title: str) -> Tuple[Optional[str], Optional[str]]:
     # 1) Lyrist (community API)
     try:
         url = f"https://lyrist.vercel.app/api/{quote(artist)}/{quote(title)}"
@@ -103,6 +159,16 @@ def fetch_lyrics_from_providers(artist: str, title: str) -> (Optional[str], Opti
         pass
 
     return None, None
+
+
+def fetch_with_variants(artist: str, title: str) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
+    """Try multiple normalized combinations. Returns (lyrics, source, used_artist, used_title)."""
+    for a in artist_variants(artist):
+        for t in title_variants(title):
+            lyr, src = fetch_lyrics_from_providers(a, t)
+            if lyr:
+                return lyr, src, a, t
+    return None, None, None, None
 
 
 # -------------------------------
@@ -198,17 +264,19 @@ def get_lyrics(artist: str = Query(...), title: str = Query(...)):
     if doc and doc.get("lyrics"):
         return LyricsOut(title=title, artist=artist, lyrics=doc.get("lyrics"), source=doc.get("lyrics_source"))
 
-    lyrics, source = fetch_lyrics_from_providers(artist, title)
+    # Try original + normalized variants
+    lyrics, source, used_artist, used_title = fetch_with_variants(artist, title)
     if not lyrics:
-        raise HTTPException(status_code=404, detail="Lirik tidak ditemukan secara otomatis")
+        raise HTTPException(status_code=404, detail="Lirik tidak ditemukan secara otomatis. Coba hapus 'feat.' atau tanda kurung dari judul/artist dan coba lagi.")
 
-    # update DB cache
+    # update DB cache (store under the canonical original keys for lookup)
     if db is not None:
         _upsert_song({
             "title": title,
             "artist": artist,
             "lyrics": lyrics,
             "lyrics_source": source,
+            "normalized": {"artist": used_artist, "title": used_title},
         })
 
     return LyricsOut(title=title, artist=artist, lyrics=lyrics, source=source)
